@@ -1,20 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
-import { 
-  Layers, 
-  Compass, 
-  Maximize2, 
-  Plus, 
-  Minus, 
-  Eye, 
-  Box, 
-  Map as MapIcon, 
-  Satellite, 
-  LocateFixed, 
-  ShieldAlert,
-  Flame,
-  Wind
-} from 'lucide-react';
+import { Layers, Compass, Plus, Minus, Eye, Box, Map as MapIcon, LocateFixed } from 'lucide-react';
 import { Drone, GeofenceZone, Waypoint } from '../types/fleet';
 import { AIRSPACE_CENTER } from '../data/mockFleet';
 
@@ -29,6 +15,106 @@ interface MapWorkspaceProps {
   selectedWaypointId: string | null;
   onSelectWaypoint: (wpId: string) => void;
 }
+
+const STATUS_COLORS: Record<string, string> = {
+  delivering: '#00f0ff',
+  en_route_pickup: '#60a5fa',
+  returning_to_base: '#34d399',
+  charging: '#fbbf24',
+  attention_required: '#f87171',
+  standby: '#94a3b8',
+  hovering: '#a78bfa',
+};
+
+const buildMarkerHtml = (drone: Drone, isSelected: boolean): string => {
+  const color = STATUS_COLORS[drone.status] || '#94a3b8';
+  const rot = drone.vitals.headingDegrees;
+  const bat = drone.vitals.batteryPercentage;
+  const batColor = bat > 60 ? '#34d399' : bat > 30 ? '#fbbf24' : '#f87171';
+  const scale = isSelected ? 1.25 : 1;
+
+  return `
+    <div style="
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      cursor: pointer;
+      transform: scale(${scale});
+      transition: transform 0.2s ease;
+    ">
+      ${isSelected ? `
+        <div style="
+          position: absolute;
+          width: 48px;
+          height: 48px;
+          border-radius: 50%;
+          background: ${color}22;
+          border: 1.5px solid ${color};
+          animation: radar-pulse 2.2s cubic-bezier(0.2, 0.7, 0.3, 1) infinite;
+          pointer-events: none;
+          z-index: 0;
+        "></div>
+      ` : ''}
+      <div style="
+        position: relative;
+        transform: rotate(${rot}deg);
+        transition: transform 0.35s ease;
+        filter: drop-shadow(0 0 6px ${color}88);
+        z-index: 1;
+      ">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Arm: NW -->
+          <line x1="16" y1="16" x2="7" y2="7" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+          <!-- Arm: NE -->
+          <line x1="16" y1="16" x2="25" y2="7" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+          <!-- Arm: SW -->
+          <line x1="16" y1="16" x2="7" y2="25" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+          <!-- Arm: SE -->
+          <line x1="16" y1="16" x2="25" y2="25" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>
+          <!-- Rotor NW -->
+          <ellipse cx="7" cy="7" rx="4.5" ry="1.6" fill="${color}" fill-opacity="0.5" transform="rotate(-45 7 7)"/>
+          <!-- Rotor NE -->
+          <ellipse cx="25" cy="7" rx="4.5" ry="1.6" fill="${color}" fill-opacity="0.5" transform="rotate(45 25 7)"/>
+          <!-- Rotor SW -->
+          <ellipse cx="7" cy="25" rx="4.5" ry="1.6" fill="${color}" fill-opacity="0.5" transform="rotate(45 7 25)"/>
+          <!-- Rotor SE -->
+          <ellipse cx="25" cy="25" rx="4.5" ry="1.6" fill="${color}" fill-opacity="0.5" transform="rotate(-45 25 25)"/>
+          <!-- Body -->
+          <ellipse cx="16" cy="16" rx="4" ry="3" fill="${color}" fill-opacity="0.9"/>
+          <circle cx="16" cy="16" r="1.5" fill="#ffffff" fill-opacity="0.95"/>
+          <!-- Forward indicator -->
+          <polygon points="16,7 17.5,11 14.5,11" fill="${color}" fill-opacity="0.85"/>
+        </svg>
+      </div>
+      <div style="
+        background: rgba(10,13,20,0.92);
+        border: 1px solid ${isSelected ? color : '#1f2a3d'};
+        border-radius: 4px;
+        padding: 2px 7px;
+        margin-top: 4px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        backdrop-filter: blur(8px);
+        pointer-events: none;
+        z-index: 2;
+        box-shadow: ${isSelected ? `0 0 10px ${color}55` : 'none'};
+      ">
+        <span style="color: ${color}; font-size: 10px; font-weight: 700; font-family: ui-monospace, monospace; letter-spacing: 0.05em;">
+          ${drone.callsign}
+        </span>
+        <div style="width: 1px; height: 8px; background: #1f2a3d;"></div>
+        <span style="color: ${batColor}; font-size: 10px; font-weight: 600; font-family: ui-monospace, monospace;">
+          ${Math.round(bat)}%
+        </span>
+        <div style="width: 1px; height: 8px; background: #1f2a3d;"></div>
+        <span style="color: #64748b; font-size: 10px; font-family: ui-monospace, monospace;">
+          ${Math.round(drone.vitals.altitudeMeters)}m
+        </span>
+      </div>
+    </div>
+  `;
+};
 
 export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
   drones,
@@ -45,8 +131,8 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<{ [key: string]: maplibregl.Marker }>({});
   const waypointMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const mapLoadedRef = useRef(false);
 
-  // Map layer toggles
   const [showFlightPaths, setShowFlightPaths] = useState(true);
   const [showGeofences, setShowGeofences] = useState(true);
   const [showRestricted, setShowRestricted] = useState(true);
@@ -54,11 +140,10 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
   const [mapStyle, setMapStyle] = useState<'satellite' | 'dark'>('satellite');
   const [showLayerMenu, setShowLayerMenu] = useState(false);
 
-  // Initialize MapLibre
+  // Initialize map
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
-    // Tactical satellite style matching the user's reference image
     const satelliteStyle: maplibregl.StyleSpecification = {
       version: 8,
       sources: {
@@ -68,7 +153,7 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
             'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
           ],
           tileSize: 256,
-          attribution: 'Esri, Maxar, Earthstar Geographics',
+          attribution: '',
           maxzoom: 19,
         },
       },
@@ -78,8 +163,8 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
           type: 'raster',
           source: 'esri-satellite',
           paint: {
-            'raster-opacity': 0.88,
-            'raster-contrast': 0.15,
+            'raster-opacity': 0.85,
+            'raster-contrast': 0.1,
             'raster-brightness-min': 0.05,
           },
         },
@@ -90,14 +175,14 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
       container: mapContainerRef.current,
       style: satelliteStyle,
       center: AIRSPACE_CENTER,
-      zoom: 14.8,
-      pitch: viewMode === '3d' ? 58 : 0,
-      bearing: viewMode === '3d' ? -18 : 0,
+      zoom: 14.5,
+      pitch: 0,
+      bearing: 0,
       attributionControl: false,
     });
 
     map.on('load', () => {
-      // Add Sources and Layers for Geofences, Restricted Zones & Flight Paths
+      mapLoadedRef.current = true;
       initMapLayers(map);
     });
 
@@ -106,259 +191,194 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
     return () => {
       map.remove();
       mapRef.current = null;
+      mapLoadedRef.current = false;
     };
   }, []);
 
-  // Update base map style (Satellite vs Dark Vector)
+  // Handle map style toggle
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    const source = map.getSource('esri-satellite') as maplibregl.RasterTileSource;
-    if (source && map.getLayer('satellite-tiles')) {
-      if (mapStyle === 'satellite') {
-        map.setPaintProperty('satellite-tiles', 'raster-opacity', 0.88);
-      } else {
-        // Dark vector mode simulation
-        map.setPaintProperty('satellite-tiles', 'raster-opacity', 0.25);
-      }
+    if (!map || !mapLoadedRef.current) return;
+    if (map.getLayer('satellite-tiles')) {
+      map.setPaintProperty('satellite-tiles', 'raster-opacity', mapStyle === 'satellite' ? 0.85 : 0.2);
+      map.setPaintProperty('satellite-tiles', 'raster-contrast', mapStyle === 'satellite' ? 0.1 : -0.2);
     }
   }, [mapStyle]);
 
-  // Handle 2D vs 3D camera transitions
+  // Handle 2D / 3D tilt toggle
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     if (viewMode === '2d') {
-      map.easeTo({
-        pitch: 0,
-        bearing: 0,
-        duration: 1200,
-      });
+      map.easeTo({ pitch: 0, bearing: 0, duration: 1000 });
     } else if (viewMode === '3d') {
-      map.easeTo({
-        pitch: 58,
-        bearing: -22,
-        duration: 1200,
-      });
+      map.easeTo({ pitch: 55, bearing: -20, duration: 1000 });
     }
   }, [viewMode]);
 
-  // Center map on selected drone
+  // Focus map on selected drone
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedDroneId) return;
-
-    const selectedDrone = drones.find((d) => d.id === selectedDroneId);
-    if (selectedDrone) {
+    const drone = drones.find((d) => d.id === selectedDroneId);
+    if (drone) {
       map.easeTo({
-        center: [selectedDrone.vitals.longitude, selectedDrone.vitals.latitude],
-        zoom: Math.max(map.getZoom(), 15.2),
-        duration: 800,
+        center: [drone.vitals.longitude, drone.vitals.latitude],
+        zoom: Math.max(map.getZoom(), 15),
+        duration: 700,
       });
     }
   }, [selectedDroneId]);
 
-  // Initialize Map Layers (Restricted polygon, Geofences, Flight Paths)
   const initMapLayers = (map: maplibregl.Map) => {
-    // 1. Restricted Zones Source (Sector 4 Red Zone)
-    const restrictedGeo = geofences.find((g) => g.type === 'restricted');
-    if (restrictedGeo) {
-      map.addSource('restricted-zone-src', {
+    // ─── Restricted TFR Zone (Red Fill) ─────────────────────────
+    const restrictedZone = geofences.find((g) => g.type === 'restricted');
+    if (restrictedZone) {
+      map.addSource('restricted-zone', {
         type: 'geojson',
         data: {
           type: 'Feature',
-          properties: { name: restrictedGeo.name },
-          geometry: {
-            type: 'Polygon',
-            coordinates: [restrictedGeo.coordinates],
-          },
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [restrictedZone.coordinates] },
         },
       });
-
-      // Red fill with hatching/grid effect
       map.addLayer({
         id: 'restricted-zone-fill',
         type: 'fill',
-        source: 'restricted-zone-src',
-        paint: {
-          'fill-color': '#dc2626',
-          'fill-opacity': 0.38,
-        },
+        source: 'restricted-zone',
+        paint: { 'fill-color': '#dc2626', 'fill-opacity': 0.28 },
       });
-
-      // Bright red outline
       map.addLayer({
-        id: 'restricted-zone-line',
+        id: 'restricted-zone-outline',
         type: 'line',
-        source: 'restricted-zone-src',
-        paint: {
-          'line-color': '#ef4444',
-          'line-width': 2.5,
-          'line-dasharray': [3, 1.5],
-        },
+        source: 'restricted-zone',
+        paint: { 'line-color': '#ef4444', 'line-width': 2, 'line-dasharray': [3, 1.5] },
       });
     }
 
-    // 2. Caution Zone (Yellow Zone)
-    const cautionGeo = geofences.find((g) => g.type === 'caution');
-    if (cautionGeo) {
-      map.addSource('caution-zone-src', {
+    // ─── Caution Zone (Amber) ────────────────────────────────────
+    const cautionZone = geofences.find((g) => g.type === 'caution');
+    if (cautionZone) {
+      map.addSource('caution-zone', {
         type: 'geojson',
         data: {
           type: 'Feature',
-          properties: { name: cautionGeo.name },
-          geometry: {
-            type: 'Polygon',
-            coordinates: [cautionGeo.coordinates],
-          },
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [cautionZone.coordinates] },
         },
       });
-
       map.addLayer({
         id: 'caution-zone-fill',
         type: 'fill',
-        source: 'caution-zone-src',
-        paint: {
-          'fill-color': '#eab308',
-          'fill-opacity': 0.18,
-        },
+        source: 'caution-zone',
+        paint: { 'fill-color': '#f59e0b', 'fill-opacity': 0.14 },
       });
-
       map.addLayer({
-        id: 'caution-zone-line',
+        id: 'caution-zone-outline',
         type: 'line',
-        source: 'caution-zone-src',
-        paint: {
-          'line-color': '#facc15',
-          'line-width': 2,
-        },
+        source: 'caution-zone',
+        paint: { 'line-color': '#fbbf24', 'line-width': 1.6 },
       });
     }
 
-    // 3. BVLOS Outer Perimeter (Boundary)
-    const boundaryGeo = geofences.find((g) => g.type === 'boundary');
-    if (boundaryGeo) {
-      map.addSource('boundary-zone-src', {
+    // ─── BVLOS Boundary (Blue Dashes) ───────────────────────────
+    const bvlosBoundary = geofences.find((g) => g.type === 'boundary');
+    if (bvlosBoundary) {
+      map.addSource('bvlos-boundary', {
         type: 'geojson',
         data: {
           type: 'Feature',
-          properties: { name: boundaryGeo.name },
-          geometry: {
-            type: 'Polygon',
-            coordinates: [boundaryGeo.coordinates],
-          },
+          properties: {},
+          geometry: { type: 'Polygon', coordinates: [bvlosBoundary.coordinates] },
         },
       });
-
       map.addLayer({
-        id: 'boundary-zone-line',
+        id: 'bvlos-boundary-outline',
         type: 'line',
-        source: 'boundary-zone-src',
-        paint: {
-          'line-color': '#38bdf8',
-          'line-width': 1.5,
-          'line-dasharray': [4, 3],
-          'line-opacity': 0.6,
-        },
+        source: 'bvlos-boundary',
+        paint: { 'line-color': '#38bdf8', 'line-width': 1.5, 'line-dasharray': [4, 3], 'line-opacity': 0.5 },
       });
     }
 
-    // 4. Flight Paths Source
-    map.addSource('flight-paths-src', {
+    // ─── Flight Paths (GeoJSON — updated in useEffect) ──────────
+    map.addSource('flight-paths', {
       type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: [],
-      },
+      data: { type: 'FeatureCollection', features: [] },
     });
-
-    // Glowing cyan/blue dashed line
     map.addLayer({
-      id: 'flight-paths-glow',
+      id: 'flight-path-glow',
       type: 'line',
-      source: 'flight-paths-src',
+      source: 'flight-paths',
       paint: {
-        'line-color': '#06b6d4',
-        'line-width': 5,
-        'line-opacity': 0.35,
-        'line-blur': 3,
+        'line-color': ['get', 'color'],
+        'line-width': 8,
+        'line-opacity': 0.25,
+        'line-blur': 4,
       },
     });
-
     map.addLayer({
-      id: 'flight-paths-line',
+      id: 'flight-path-line',
       type: 'line',
-      source: 'flight-paths-src',
+      source: 'flight-paths',
       paint: {
-        'line-color': '#22d3ee',
-        'line-width': 2.2,
-        'line-dasharray': [3, 2],
+        'line-color': ['get', 'color'],
+        'line-width': ['case', ['get', 'isSelected'], 2.5, 1.5],
+        'line-opacity': ['case', ['get', 'isSelected'], 0.9, 0.5],
+        'line-dasharray': [4, 2],
       },
     });
 
-    // 5. Proposed Replanning Detour Route Source
-    map.addSource('proposed-replan-src', {
+    // ─── Proposed Replan Route ───────────────────────────────────
+    map.addSource('proposed-route', {
       type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: [],
-      },
+      data: { type: 'FeatureCollection', features: [] },
     });
-
     map.addLayer({
-      id: 'proposed-replan-line',
+      id: 'proposed-route-line',
       type: 'line',
-      source: 'proposed-replan-src',
-      paint: {
-        'line-color': '#10b981',
-        'line-width': 3.5,
-        'line-dasharray': [2, 1],
-      },
+      source: 'proposed-route',
+      paint: { 'line-color': '#34d399', 'line-width': 3, 'line-dasharray': [2, 1], 'line-opacity': 0.9 },
     });
   };
 
-  // Update Flight Paths GeoJSON when drones change
+  // Update flight path GeoJSON when drones change
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    const source = map.getSource('flight-paths-src') as maplibregl.GeoJSONSource;
+    if (!map || !mapLoadedRef.current) return;
+    const source = map.getSource('flight-paths') as maplibregl.GeoJSONSource;
     if (!source) return;
 
-    const features = drones
-      .filter((d) => d.route.length > 1)
-      .map((d) => {
-        const isSelected = d.id === selectedDroneId;
-        const coordinates = d.route.map((w) => [w.lng, w.lat]);
-        return {
-          type: 'Feature' as const,
-          properties: {
-            droneId: d.id,
-            callsign: d.callsign,
-            isSelected,
-            status: d.status,
-          },
-          geometry: {
-            type: 'LineString' as const,
-            coordinates,
-          },
-        };
-      });
-
-    source.setData({
+    const features: maplibregl.GeoJSONSource['_data'] = {
       type: 'FeatureCollection',
-      features,
-    });
+      features: drones.flatMap((drone) => {
+        const isSelected = drone.id === selectedDroneId;
+        const color = STATUS_COLORS[drone.status] || '#94a3b8';
+        const upcomingWaypoints = drone.route.filter((w) => w.status === 'active' || w.status === 'upcoming');
+        if (upcomingWaypoints.length < 1) return [];
+
+        const coords = [
+          [drone.vitals.longitude, drone.vitals.latitude],
+          ...upcomingWaypoints.map((w) => [w.lng, w.lat]),
+        ];
+
+        return [
+          {
+            type: 'Feature' as const,
+            properties: { droneId: drone.id, color, isSelected },
+            geometry: { type: 'LineString', coordinates: coords },
+          },
+        ];
+      }),
+    };
+
+    source.setData(features as any);
   }, [drones, selectedDroneId]);
 
-  // Update Proposed Replan Path GeoJSON
+  // Update proposed replan route
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    const source = map.getSource('proposed-replan-src') as maplibregl.GeoJSONSource;
+    if (!map || !mapLoadedRef.current) return;
+    const source = map.getSource('proposed-route') as maplibregl.GeoJSONSource;
     if (!source) return;
 
     if (proposedRoute && proposedRoute.length > 1) {
@@ -367,42 +387,37 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
         features: [
           {
             type: 'Feature',
-            properties: { type: 'replan' },
+            properties: {},
             geometry: {
               type: 'LineString',
-              coordinates: proposedRoute.map((w) => [w.lng, w.lat]),
+              coordinates: proposedRoute.map((wp) => [wp.lng, wp.lat]),
             },
           },
         ],
-      });
+      } as any);
     } else {
-      source.setData({
-        type: 'FeatureCollection',
-        features: [],
-      });
+      source.setData({ type: 'FeatureCollection', features: [] } as any);
     }
   }, [proposedRoute]);
 
-  // Layer Visibility Toggles
+  // Toggle layer visibility
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    if (map.getLayer('flight-paths-line')) {
-      map.setLayoutProperty('flight-paths-line', 'visibility', showFlightPaths ? 'visible' : 'none');
-      map.setLayoutProperty('flight-paths-glow', 'visibility', showFlightPaths ? 'visible' : 'none');
-    }
-    if (map.getLayer('restricted-zone-fill')) {
-      map.setLayoutProperty('restricted-zone-fill', 'visibility', showRestricted ? 'visible' : 'none');
-      map.setLayoutProperty('restricted-zone-line', 'visibility', showRestricted ? 'visible' : 'none');
-    }
-    if (map.getLayer('caution-zone-fill')) {
-      map.setLayoutProperty('caution-zone-fill', 'visibility', showGeofences ? 'visible' : 'none');
-      map.setLayoutProperty('caution-zone-line', 'visibility', showGeofences ? 'visible' : 'none');
-    }
+    if (!map || !mapLoadedRef.current) return;
+    const setLayerVisibility = (layerId: string, visible: boolean) => {
+      if (map.getLayer(layerId)) {
+        map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+      }
+    };
+    setLayerVisibility('flight-path-glow', showFlightPaths);
+    setLayerVisibility('flight-path-line', showFlightPaths);
+    setLayerVisibility('restricted-zone-fill', showRestricted);
+    setLayerVisibility('restricted-zone-outline', showRestricted);
+    setLayerVisibility('caution-zone-fill', showGeofences);
+    setLayerVisibility('caution-zone-outline', showGeofences);
   }, [showFlightPaths, showGeofences, showRestricted]);
 
-  // Synchronize Drone HTML Markers (Matches Reference Image with Heading, Alt, Battery)
+  // Render / update drone HTML markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -412,338 +427,234 @@ export const MapWorkspace: React.FC<MapWorkspaceProps> = ({
       let marker = markersRef.current[drone.id];
 
       if (!marker) {
-        // Create custom DOM element for drone marker
         const el = document.createElement('div');
-        el.className = 'drone-marker-container cursor-pointer select-none';
         el.addEventListener('click', (e) => {
           e.stopPropagation();
           onSelectDrone(drone.id);
         });
-
-        marker = new maplibregl.Marker({
-          element: el,
-          anchor: 'center',
-        })
+        marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
           .setLngLat([drone.vitals.longitude, drone.vitals.latitude])
           .addTo(map);
-
         markersRef.current[drone.id] = marker;
       } else {
         marker.setLngLat([drone.vitals.longitude, drone.vitals.latitude]);
       }
 
-      // Update inner HTML of marker to match screenshot badge
-      const markerEl = marker.getElement();
-      const batColor = drone.vitals.batteryPercentage > 50 ? '#10b981' : drone.vitals.batteryPercentage > 25 ? '#f59e0b' : '#ef4444';
-      const isWarning = drone.status === 'attention_required' || drone.vitals.batteryPercentage < 30;
-
-      markerEl.innerHTML = `
-        <div class="relative flex flex-col items-center group">
-          ${isSelected ? `
-            <!-- Pulsing Radar Ring for Selected Drone -->
-            <div class="absolute -inset-3 rounded-full bg-cyan-400/20 radar-ring pointer-events-none"></div>
-            <div class="absolute -inset-1.5 rounded-full border border-cyan-400/80 pointer-events-none"></div>
-          ` : ''}
-
-          <!-- Directional Heading Arrow & Drone Icon -->
-          <div class="w-8 h-8 rounded-full ${isWarning ? 'bg-amber-600' : isSelected ? 'bg-cyan-500' : 'bg-slate-900'} border-2 ${isSelected ? 'border-white' : 'border-cyan-400'} shadow-lg flex items-center justify-center transition-transform duration-300" style="transform: rotate(${drone.vitals.headingDegrees}deg);">
-            <svg viewBox="0 0 24 24" class="w-5 h-5 text-white" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polygon points="12 2 19 21 12 17 5 21 12 2" fill="currentColor" fill-opacity="0.8" />
-            </svg>
-          </div>
-
-          <!-- Drone Badge Tag (Matches Reference Image) -->
-          <div class="mt-1 px-2 py-0.5 rounded bg-[#0d121f]/95 border ${isSelected ? 'border-cyan-400 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.4)]' : 'border-[#22314d] text-slate-200'} text-[10px] font-mono font-bold whitespace-nowrap flex items-center gap-1.5 backdrop-blur-sm pointer-events-none">
-            <span class="${isWarning ? 'text-amber-400' : 'text-cyan-400'}">${drone.callsign}</span>
-            <span class="text-slate-400">•</span>
-            <span class="text-slate-300">${Math.round(drone.vitals.altitudeMeters)}m</span>
-            <span class="text-slate-400">•</span>
-            <span style="color: ${batColor}">${Math.round(drone.vitals.batteryPercentage)}%</span>
-          </div>
-        </div>
-      `;
+      const el = marker.getElement();
+      el.innerHTML = buildMarkerHtml(drone, isSelected);
     });
   }, [drones, selectedDroneId]);
 
-  // Synchronize Waypoint Markers for Selected Drone
+  // Render / update waypoint markers for selected drone
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Clear existing waypoint markers
+    // Remove all previous waypoint markers
     waypointMarkersRef.current.forEach((m) => m.remove());
     waypointMarkersRef.current = [];
 
     if (!showWaypoints) return;
+    const selectedDrone = drones.find((d) => d.id === selectedDroneId);
+    if (!selectedDrone) return;
 
-    const activeDrone = drones.find((d) => d.id === selectedDroneId) || drones[0];
-    if (!activeDrone) return;
-
-    activeDrone.route.forEach((wp, idx) => {
+    selectedDrone.route.forEach((wp) => {
       const isSelectedWp = wp.id === selectedWaypointId;
       const el = document.createElement('div');
-      el.className = 'cursor-pointer select-none';
+      el.style.cursor = 'pointer';
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         onSelectWaypoint(wp.id);
       });
 
-      let iconHtml = 'WP';
-      let bgColor = 'bg-slate-800 border-slate-600';
-      if (wp.type === 'base') {
-        iconHtml = 'H';
-        bgColor = 'bg-cyan-900 border-cyan-400 text-cyan-300';
-      } else if (wp.type === 'delivery') {
-        iconHtml = '📍';
-        bgColor = 'bg-emerald-900 border-emerald-400 text-emerald-300';
-      } else if (wp.type === 'pickup') {
-        iconHtml = '📦';
-        bgColor = 'bg-blue-900 border-blue-400 text-blue-300';
-      } else if (wp.type === 'handoff') {
-        iconHtml = 'H';
-        bgColor = 'bg-indigo-900 border-indigo-400 text-indigo-300';
-      }
+      let dotColor = '#94a3b8';
+      let borderColor = '#1f2a3d';
+      let labelBg = 'rgba(10,13,20,0.85)';
+
+      if (wp.type === 'base') { dotColor = '#34d399'; borderColor = '#059669'; }
+      else if (wp.type === 'delivery') { dotColor = '#00f0ff'; borderColor = '#0891b2'; }
+      else if (wp.type === 'pickup') { dotColor = '#60a5fa'; borderColor = '#1d4ed8'; }
+      else if (wp.type === 'handoff') { dotColor = '#c084fc'; borderColor = '#7c3aed'; }
+      else if (wp.type === 'transit') { dotColor = '#475569'; borderColor = '#334155'; }
+
+      if (wp.status === 'completed') { dotColor = '#334155'; borderColor = '#1e293b'; }
 
       el.innerHTML = `
-        <div class="relative flex flex-col items-center group">
-          <div class="w-6 h-6 rounded-full ${bgColor} border-2 flex items-center justify-center text-[10px] font-bold font-mono shadow-md ${isSelectedWp ? 'ring-2 ring-white scale-110' : ''}">
-            ${iconHtml}
-          </div>
-          <div class="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-7 bg-slate-900 text-white text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-700 whitespace-nowrap pointer-events-none">
-            ${wp.name} (${wp.altitudeMeters}m)
-          </div>
+        <div style="display: flex; flex-direction: column; align-items: center;">
+          <div style="
+            width: ${isSelectedWp ? '16px' : '10px'};
+            height: ${isSelectedWp ? '16px' : '10px'};
+            border-radius: 50%;
+            background: ${dotColor};
+            border: 2px solid ${borderColor};
+            box-shadow: 0 0 ${isSelectedWp ? '10px' : '5px'} ${dotColor}66;
+            transition: all 0.2s;
+          "></div>
+          ${isSelectedWp ? `
+            <div style="
+              background: ${labelBg};
+              border: 1px solid ${borderColor};
+              border-radius: 3px;
+              padding: 1px 5px;
+              font-size: 9px;
+              font-family: monospace;
+              color: ${dotColor};
+              margin-top: 2px;
+              white-space: nowrap;
+            ">${wp.name.split(' ').slice(0, 2).join(' ')}</div>
+          ` : ''}
         </div>
       `;
 
-      const m = new maplibregl.Marker({ element: el, anchor: 'center' })
+      const m = new maplibregl.Marker({ element: el, anchor: 'bottom' })
         .setLngLat([wp.lng, wp.lat])
         .addTo(map);
-
       waypointMarkersRef.current.push(m);
     });
   }, [drones, selectedDroneId, selectedWaypointId, showWaypoints]);
 
   return (
-    <div className="relative flex-1 h-full w-full bg-[#080b12] overflow-hidden">
-      {/* MapLibre GL Canvas Container */}
+    <div className="relative flex-1 w-full h-full overflow-hidden bg-[#080b12]">
+      {/* MapLibre canvas container */}
       <div ref={mapContainerRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Static Airspace Labels matching Reference Image */}
-      {/* 1. RESTRICTED ZONE center badge */}
-      <div 
-        className="absolute top-[28%] left-[58%] -translate-x-1/2 -translate-y-1/2 pointer-events-none select-none z-10 transition-opacity"
-        style={{ opacity: showRestricted ? 1 : 0 }}
-      >
-        <div className="px-3 py-1 bg-red-950/80 border border-red-500/80 rounded text-red-300 text-[11px] font-extrabold tracking-widest uppercase font-mono shadow-[0_0_15px_rgba(239,68,68,0.5)]">
-          RESTRICTED ZONE
+      {/* Geofence zone labels (positioned over map visually) */}
+      <div className="absolute inset-0 pointer-events-none z-10">
+        {/* Restricted Zone Label */}
+        <div
+          className="absolute"
+          style={{ top: '26%', left: '56%', transform: 'translate(-50%, -50%)' }}
+        >
+          <div className="px-2 py-1 rounded border text-[10px] font-mono font-bold tracking-widest uppercase"
+            style={{
+              background: 'rgba(127,29,29,0.7)',
+              borderColor: 'rgba(239,68,68,0.6)',
+              color: '#fca5a5',
+              boxShadow: '0 0 12px rgba(239,68,68,0.3)',
+            }}>
+            RESTRICTED ZONE
+          </div>
         </div>
       </div>
 
-      {/* 2. CAUTION AREA label */}
-      <div 
-        className="absolute top-[42%] left-[72%] -translate-x-1/2 -translate-y-1/2 pointer-events-none select-none z-10 transition-opacity"
-        style={{ opacity: showGeofences ? 1 : 0 }}
-      >
-        <div className="px-2.5 py-0.5 bg-amber-950/70 border border-amber-500/70 rounded text-amber-300 text-[9px] font-bold tracking-wider uppercase font-mono shadow-[0_0_10px_rgba(245,158,11,0.3)]">
-          CAUTION AREA
-        </div>
-      </div>
-
-      {/* Top-Right Floating Controls (Matches Reference Image) */}
-      <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-2">
-        {/* Primary View Modes Switcher: 2D | 3D | POV (Exactly per specs) */}
-        <div className="flex items-center bg-[#0d121f]/90 backdrop-blur-md p-1 rounded-md border border-[#243350] shadow-xl">
-          <button
-            onClick={() => setViewMode('2d')}
-            className={`px-3 py-1.5 rounded text-xs font-bold font-mono transition-all flex items-center gap-1.5 ${
-              viewMode === '2d'
-                ? 'bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-            }`}
-            title="Conventional Top-Down 2D Tactical View"
-          >
-            <MapIcon className="w-3.5 h-3.5" />
-            2D
-          </button>
-
-          <button
-            onClick={() => setViewMode('3d')}
-            className={`px-3 py-1.5 rounded text-xs font-bold font-mono transition-all flex items-center gap-1.5 ${
-              viewMode === '3d'
-                ? 'bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-            }`}
-            title="3D Airspace View with Extruded Altitude & Terrain Tilt"
-          >
-            <Box className="w-3.5 h-3.5" />
-            3D
-          </button>
-
-          <button
-            onClick={() => setViewMode('pov')}
-            className={`px-3 py-1.5 rounded text-xs font-bold font-mono transition-all flex items-center gap-1.5 ${
-              viewMode === 'pov'
-                ? 'bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-            }`}
-            title="First-Person Drone Cockpit / Forward Camera POV"
-          >
-            <Eye className="w-3.5 h-3.5 text-cyan-400 group-hover:text-cyan-300" />
-            POV
-          </button>
+      {/* ── TOP-RIGHT Map Controls ───────────────────────────────── */}
+      <div className="absolute top-4 right-4 z-30 flex flex-col items-end gap-2">
+        {/* View Mode Toggle */}
+        <div className="hud-glass rounded-md overflow-hidden flex">
+          {(['2d', '3d', 'pov'] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setViewMode(mode)}
+              className={`px-3 py-2 text-xs font-mono font-bold uppercase transition-all ${
+                viewMode === mode
+                  ? 'bg-cyan-500/20 text-cyan-400 border-b border-cyan-500'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
+              }`}
+            >
+              {mode === 'pov' ? <Eye className="w-3.5 h-3.5" /> : mode}
+            </button>
+          ))}
         </div>
 
-        {/* Quick Camera & Map Action Buttons */}
-        <div className="flex items-center gap-1 bg-[#0d121f]/90 backdrop-blur-md p-1 rounded-md border border-[#243350] shadow-xl text-slate-300">
-          {/* Zoom In */}
+        {/* Zoom + Compass Controls */}
+        <div className="hud-glass rounded-md flex flex-col divide-y divide-white/5">
           <button
             onClick={() => mapRef.current?.zoomIn()}
-            className="p-1.5 hover:text-cyan-300 hover:bg-slate-800/60 rounded transition-colors"
+            className="p-2.5 text-slate-400 hover:text-white hover:bg-white/5 transition-all"
             title="Zoom In"
           >
             <Plus className="w-4 h-4" />
           </button>
-
-          {/* Zoom Out */}
           <button
             onClick={() => mapRef.current?.zoomOut()}
-            className="p-1.5 hover:text-cyan-300 hover:bg-slate-800/60 rounded transition-colors"
+            className="p-2.5 text-slate-400 hover:text-white hover:bg-white/5 transition-all"
             title="Zoom Out"
           >
             <Minus className="w-4 h-4" />
           </button>
-
-          {/* Reset North / Compass */}
           <button
             onClick={() => mapRef.current?.resetNorthPitch()}
-            className="p-1.5 hover:text-cyan-300 hover:bg-slate-800/60 rounded transition-colors"
-            title="Reset North & Pitch"
+            className="p-2.5 text-slate-400 hover:text-cyan-400 hover:bg-white/5 transition-all"
+            title="Reset North"
           >
-            <Compass className="w-4 h-4 text-cyan-400" />
+            <Compass className="w-4 h-4" />
           </button>
-
-          {/* Center on Selected Drone */}
           <button
             onClick={() => {
-              const d = drones.find((dr) => dr.id === selectedDroneId) || drones[0];
-              if (d && mapRef.current) {
+              const selected = drones.find((d) => d.id === selectedDroneId);
+              if (selected && mapRef.current) {
                 mapRef.current.easeTo({
-                  center: [d.vitals.longitude, d.vitals.latitude],
+                  center: [selected.vitals.longitude, selected.vitals.latitude],
                   zoom: 15.5,
-                  duration: 800,
+                  duration: 700,
                 });
               }
             }}
-            className="p-1.5 hover:text-cyan-300 hover:bg-slate-800/60 rounded transition-colors"
-            title="Track Selected Aircraft"
+            className="p-2.5 text-slate-400 hover:text-emerald-400 hover:bg-white/5 transition-all"
+            title="Track Selected Drone"
           >
-            <LocateFixed className="w-4 h-4 text-emerald-400" />
+            <LocateFixed className="w-4 h-4" />
           </button>
-
-          {/* Layers Popover Toggle */}
           <button
             onClick={() => setShowLayerMenu((prev) => !prev)}
-            className={`p-1.5 rounded transition-colors ${showLayerMenu ? 'bg-cyan-500/20 text-cyan-300' : 'hover:text-cyan-300 hover:bg-slate-800/60'}`}
-            title="Toggle Map Layers"
+            className={`p-2.5 transition-all ${showLayerMenu ? 'text-cyan-400 bg-white/5' : 'text-slate-400 hover:text-white hover:bg-white/5'}`}
+            title="Toggle Layers"
           >
             <Layers className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Layers Dropdown Menu */}
+        {/* Layer Control Panel */}
         {showLayerMenu && (
-          <div className="w-52 bg-[#0c111e]/95 backdrop-blur-md border border-[#233352] rounded-md p-3 shadow-2xl text-xs space-y-2 select-none">
-            <div className="font-bold font-mono uppercase text-slate-300 tracking-wider text-[11px] pb-1.5 border-b border-slate-800 flex items-center justify-between">
-              <span>AIRSPACE LAYERS</span>
-              <button 
-                onClick={() => setShowLayerMenu(false)}
-                className="text-slate-500 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-
-            <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white py-0.5">
-              <span>Flight Paths</span>
-              <input
-                type="checkbox"
-                checked={showFlightPaths}
-                onChange={(e) => setShowFlightPaths(e.target.checked)}
-                className="accent-cyan-400 rounded"
-              />
-            </label>
-
-            <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white py-0.5">
-              <span>Geofence Buffers</span>
-              <input
-                type="checkbox"
-                checked={showGeofences}
-                onChange={(e) => setShowGeofences(e.target.checked)}
-                className="accent-amber-400 rounded"
-              />
-            </label>
-
-            <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white py-0.5">
-              <span>Restricted Zones</span>
-              <input
-                type="checkbox"
-                checked={showRestricted}
-                onChange={(e) => setShowRestricted(e.target.checked)}
-                className="accent-rose-500 rounded"
-              />
-            </label>
-
-            <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white py-0.5">
-              <span>Waypoints & Hubs</span>
-              <input
-                type="checkbox"
-                checked={showWaypoints}
-                onChange={(e) => setShowWaypoints(e.target.checked)}
-                className="accent-cyan-400 rounded"
-              />
-            </label>
-
-            <div className="pt-2 border-t border-slate-800 text-[10px] space-y-1">
-              <div className="text-slate-400 font-mono">BASEMAP STYLE</div>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  onClick={() => setMapStyle('satellite')}
-                  className={`px-2 py-1 rounded text-center font-mono font-medium ${mapStyle === 'satellite' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/50' : 'bg-slate-800 text-slate-400'}`}
+          <div className="hud-glass rounded-lg p-3 w-44 shadow-2xl">
+            <p className="text-[10px] font-mono text-slate-400 uppercase tracking-widest mb-2">Layers</p>
+            {[
+              { label: 'Flight Paths', state: showFlightPaths, set: setShowFlightPaths },
+              { label: 'Geofences', state: showGeofences, set: setShowGeofences },
+              { label: 'Restricted Zones', state: showRestricted, set: setShowRestricted },
+              { label: 'Waypoints', state: showWaypoints, set: setShowWaypoints },
+            ].map(({ label, state, set }) => (
+              <label key={label} className="flex items-center justify-between py-1.5 cursor-pointer hover:text-white transition-colors">
+                <span className="text-[11px] text-slate-400">{label}</span>
+                <div
+                  onClick={() => set(!state)}
+                  className={`relative w-7 h-4 rounded-full transition-all cursor-pointer ${state ? 'bg-cyan-500/30 border border-cyan-500/50' : 'bg-slate-700/50 border border-slate-600'}`}
                 >
-                  Satellite
-                </button>
-                <button
-                  onClick={() => setMapStyle('dark')}
-                  className={`px-2 py-1 rounded text-center font-mono font-medium ${mapStyle === 'dark' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/50' : 'bg-slate-800 text-slate-400'}`}
-                >
-                  Dark Radar
-                </button>
+                  <div className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${state ? 'bg-cyan-400 left-3.5' : 'bg-slate-500 left-0.5'}`} />
+                </div>
+              </label>
+            ))}
+            <div className="border-t border-white/5 mt-2 pt-2">
+              <p className="text-[10px] text-slate-500 mb-1.5">Basemap</p>
+              <div className="grid grid-cols-2 gap-1">
+                {(['satellite', 'dark'] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setMapStyle(s)}
+                    className={`py-1 px-2 rounded text-[10px] font-mono capitalize transition-all ${
+                      mapStyle === s
+                        ? 'bg-cyan-500/20 border border-cyan-500/40 text-cyan-400'
+                        : 'text-slate-500 hover:text-slate-300 border border-transparent hover:border-slate-600'
+                    }`}
+                  >
+                    {s === 'satellite' ? 'Satellite' : 'Dark'}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Bottom Scale Bar (Matches Reference Image: "500 m") */}
-      <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2 bg-[#0c111e]/85 backdrop-blur-md px-2.5 py-1 rounded border border-[#22314d] text-slate-300 text-[10px] font-mono shadow-lg">
-        <div className="w-14 h-1.5 border-b-2 border-l-2 border-r-2 border-cyan-400"></div>
-        <span>500 m</span>
+      {/* Scale bar */}
+      <div className="absolute bottom-4 left-4 z-20 flex items-center gap-1.5 px-2.5 py-1.5 hud-glass rounded">
+        <div className="w-10 h-2 border-b-2 border-l-2 border-r-2 border-slate-500" />
+        <span className="text-[10px] font-mono text-slate-400">500 m</span>
       </div>
 
-      {/* Bottom Legend (Matches Reference Image: "--- Flight Path", "■ Geofence", "■ Restricted") */}
-      <div className="absolute bottom-4 right-4 z-20 hidden sm:flex items-center gap-4 bg-[#0c111e]/90 backdrop-blur-md px-3 py-1.5 rounded border border-[#22314d] text-[11px] font-mono text-slate-300 shadow-lg select-none">
-        <div className="flex items-center gap-1.5">
-          <span className="w-4 h-0.5 border-b-2 border-dashed border-cyan-400"></span>
-          <span>Flight Path</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 border border-amber-400 bg-amber-400/20"></span>
-          <span>Geofence</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 border border-rose-500 bg-rose-500/30"></span>
-          <span>Restricted</span>
-        </div>
+      {/* SIMULATION badge */}
+      <div className="absolute bottom-4 right-4 z-20 px-2 py-1 hud-glass rounded">
+        <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">SIMULATION MODE</span>
       </div>
     </div>
   );
